@@ -130,11 +130,11 @@ class BPARHMM:
         # Prior mean of AR coefficients (zero = no dynamics prior)
         self.prior_M = np.zeros((d, m))
         # Prior precision on AR coefficients
-        self.prior_K = np.eye(m) * 5.0
+        self.prior_K = np.eye(m) * 0.1
         # IW degrees of freedom
         self.prior_nu = d + 2
         # IW scale matrix
-        self.prior_nu_delta = np.eye(d) * 0.01
+        self.prior_nu_delta = np.eye(d) * 0.1
 
     def _run_chain(self):
         """Run a single MCMC chain."""
