@@ -130,11 +130,11 @@ class BPARHMM:
         # Prior mean of AR coefficients (zero = no dynamics prior)
         self.prior_M = np.zeros((d, m))
         # Prior precision on AR coefficients
-        self.prior_K = np.eye(m) * 0.1
+        self.prior_K = np.eye(m) * 5.0
         # IW degrees of freedom
         self.prior_nu = d + 2
         # IW scale matrix
-        self.prior_nu_delta = np.eye(d) * 0.1
+        self.prior_nu_delta = np.eye(d) * 0.01
 
     def _run_chain(self):
         """Run a single MCMC chain."""
@@ -255,66 +255,62 @@ class BPARHMM:
         birth/death of unique features.
         """
         N, K = F.shape
-        d, m = self.d, self.m
 
         for i in range(N):
-            obs_i = self.obs_list[i]
-            X_i = self.X_list[i]
-            T_i = obs_i.shape[1]
-
             # Count how many other demos use each feature
             other_counts = F.sum(axis=0) - F[i]
 
-            for k in range(K):
+            for k in range(F.shape[1]):
                 if other_counts[k] > 0:
                     # Shared feature: MH toggle
-                    F_prop = F.copy()
-                    F_prop[i, k] = 1 - F[i, k]
-
-                    # Must have at least one active feature
-                    if F_prop[i].sum() == 0:
+                    # Must have at least one active feature after toggle
+                    if F[i, k] == 1 and F[i].sum() <= 1:
                         continue
 
-                    # Log prior ratio
-                    n_other = other_counts[k]
+                    # IBP prior ratio: p(f_ik=1)/p(f_ik=0) = m_{-i,k} / (N - m_{-i,k})
+                    # where m_{-i,k} = number of OTHER demos using feature k
+                    m_ik = other_counts[k]
                     if F[i, k] == 1:
-                        # Proposing to turn off
-                        log_prior_ratio = np.log(N - n_other) - np.log(n_other)
+                        # Proposing to turn off: ratio = p(0)/p(1)
+                        log_prior_ratio = np.log(N - m_ik) - np.log(m_ik)
                     else:
-                        # Proposing to turn on
-                        log_prior_ratio = np.log(n_other) - np.log(N - n_other)
+                        # Proposing to turn on: ratio = p(1)/p(0)
+                        log_prior_ratio = np.log(m_ik) - np.log(N - m_ik)
 
-                    # Approximate likelihood ratio by checking if state sequence
-                    # uses this skill. Full resampling is too expensive per toggle.
+                    # Likelihood ratio: check how much this skill is used in labels
                     count_k = np.sum(labels[i] == k)
-                    if F[i, k] == 1 and count_k > T_i * 0.05:
-                        # This skill is actively used, unlikely to turn off
-                        log_lik_ratio = -count_k * 0.5
+                    if F[i, k] == 1 and count_k > 0:
+                        # Turning off an actively used skill is costly
+                        log_lik_ratio = -count_k * 2.0
                     elif F[i, k] == 0:
-                        log_lik_ratio = 0.0  # neutral
+                        # Turning on: small bonus only if many demos use it
+                        log_lik_ratio = 0.0
                     else:
                         log_lik_ratio = 0.0
 
                     log_accept = log_prior_ratio + log_lik_ratio
                     if np.log(np.random.rand()) < log_accept:
-                        F = F_prop
+                        old_val = F[i, k]
+                        F[i, k] = 1 - old_val
                         # Reassign labels that used this skill if we turned it off
-                        if F[i, k] == 0:
+                        if old_val == 1:
                             active = np.where(F[i] > 0)[0]
                             if len(active) > 0:
                                 mask = labels[i] == k
-                                labels[i][mask] = np.random.choice(active, size=mask.sum())
+                                if mask.any():
+                                    labels[i][mask] = np.random.choice(
+                                        active, size=mask.sum()
+                                    )
 
             # Birth-death moves for unique features (used only by demo i)
             unique_mask = (F.sum(axis=0) == F[i]) & (F[i] == 1)
             n_unique = unique_mask.sum()
 
-            # Death move
+            # Death move: try to kill a unique feature
             if n_unique > 0 and np.random.rand() < 0.5:
                 unique_indices = np.where(unique_mask)[0]
                 kill_idx = np.random.choice(unique_indices)
                 if F[i].sum() > 1:
-                    # Remove this feature
                     active = np.where(F[i] > 0)[0]
                     active = active[active != kill_idx]
                     mask = labels[i] == kill_idx
@@ -322,30 +318,42 @@ class BPARHMM:
                         labels[i][mask] = np.random.choice(active, size=mask.sum())
                     F[i, kill_idx] = 0
 
-            # Birth move
+            # Birth move: propose a new unique feature for this demo
             elif np.random.rand() < gamma0 / N:
-                # Add a new feature column
                 new_col = np.zeros((N, 1), dtype=int)
                 new_col[i, 0] = 1
                 F = np.hstack([F, new_col])
-                K_new = F.shape[1]
-                # Extend theta
                 theta = self._extend_theta(theta, 1)
 
-        # Prune unused features (columns that are all zeros)
-        used = F.sum(axis=0) > 0
-        if not np.all(used):
-            keep_indices = np.where(used)[0]
+        # Prune: remove features unused in ANY label sequence
+        # This prevents phantom features from accumulating
+        K = F.shape[1]
+        used_in_labels = np.zeros(K, dtype=bool)
+        for i in range(N):
+            for k in np.unique(labels[i]):
+                if k < K:
+                    used_in_labels[k] = True
+        # Also keep features that are active in F even if not in labels yet
+        used_in_F = F.sum(axis=0) > 0
+        # A feature survives if it's in F AND used in labels, or if it's shared
+        shared = F.sum(axis=0) >= 2
+        keep_mask = (used_in_F & used_in_labels) | shared
+        # Always keep at least one feature
+        if not keep_mask.any():
+            keep_mask[0] = True
+
+        if not np.all(keep_mask):
+            keep_indices = np.where(keep_mask)[0]
             F = F[:, keep_indices]
             theta['A'] = theta['A'][:, :, keep_indices]
             theta['Sigma'] = theta['Sigma'][:, :, keep_indices]
             theta['invSigma'] = theta['invSigma'][:, :, keep_indices]
             # Remap labels
-            remap = {old: new for new, old in enumerate(keep_indices)}
+            remap = {int(old): new for new, old in enumerate(keep_indices)}
             for i in range(N):
                 new_labels = np.zeros_like(labels[i])
                 for t in range(len(labels[i])):
-                    old_label = labels[i][t]
+                    old_label = int(labels[i][t])
                     if old_label in remap:
                         new_labels[t] = remap[old_label]
                     else:
@@ -353,9 +361,12 @@ class BPARHMM:
                         new_labels[t] = active[0] if len(active) > 0 else 0
                 labels[i] = new_labels
 
-        # Update distributions
-        dist = self._init_distributions(F)
+        # Ensure every demo has at least one active feature
+        for i in range(N):
+            if F[i].sum() == 0:
+                F[i, 0] = 1
 
+        dist = self._init_distributions(F)
         return F, theta, dist, labels
 
     def _extend_theta(self, theta, n_new):

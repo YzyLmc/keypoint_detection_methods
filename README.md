@@ -1,7 +1,12 @@
-## (WIP) Key point Detection and Segmentation Methods
+## Keypoint Detection and Segmentation for Robotic Demonstrations
 
-A collection of key point detection and segmentation methods. Re-implemented in python. Most work done by Claude code.
+Python implementations of keypoint detection and segmentation methods for robotic task demonstrations.
 
-Current algorithms implemented:
+### Implemented Algorithms
 
-- Beta Process Auto-regressive Hidden Markov Model (__BP-AR-HMM__) 
+- **BP-AR-HMM** — Beta Process Auto-Regressive Hidden Markov Model
+- **HDP-HMM** — Hierarchical Dirichlet Process Hidden Markov Model
+
+### Usage
+
+Each algorithm folder includes inference scripts for Robomimic datasets (`.hdf5`), along with a rendering script to visualize segmentation results on demonstration videos (requires Robomimic).
